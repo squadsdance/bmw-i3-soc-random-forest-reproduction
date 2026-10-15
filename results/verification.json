@@ -1,0 +1,13 @@
+{
+  "status": "passed",
+  "rf_test_models": 20,
+  "elm_test_models": 5,
+  "validation_fits": 100,
+  "test_rows": 118974,
+  "checks": [
+    "coverage",
+    "finite predictions",
+    "recomputed metrics",
+    "source audit"
+  ]
+}
