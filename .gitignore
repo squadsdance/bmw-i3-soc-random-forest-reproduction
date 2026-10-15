@@ -1,6 +1,6 @@
 .packages/
 __pycache__/
-data/
+data/dataset.zip
 tmp/
 *.joblib
 *.pdf
@@ -8,3 +8,4 @@ paper.txt
 results_initial/
 *.csv.gz
 github-proof.png
+results_quick/
