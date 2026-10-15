@@ -1,0 +1,10 @@
+.packages/
+__pycache__/
+data/
+tmp/
+*.joblib
+*.pdf
+paper.txt
+results_initial/
+*.csv.gz
+github-proof.png

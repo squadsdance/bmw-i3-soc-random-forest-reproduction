@@ -1,0 +1,22 @@
+{
+  "source": "Sulaiman and Mustaffa, 2024, Table 2, DOI 10.1016/j.geits.2024.100177",
+  "status": "Published values transcribed from the PDF; these are not measured reproduction results",
+  "number_format": "The printed 5.902,8 is interpreted as 5.9028; the unusual mixed separators are retained in the source PDF",
+  "units": "SOC percentage points; computation time in seconds",
+  "best": {
+    "RF_25": [5.9028, 4.4321, 24.2175, 5.8999],
+    "RF_50": [5.9256, 4.4152, 24.5568, 5.9231],
+    "RF_75": [5.9949, 4.4788, 24.6938, 5.9948],
+    "RF_100": [5.9547, 4.4767, 25.7958, 5.9545],
+    "ELM": [6.3127, 5.1112, 27.8597, 5.6739]
+  },
+  "average": {
+    "RF_25": [6.0622, 4.5129, 25.9245, 6.0616],
+    "RF_50": [5.9992, 4.5106, 24.2992, 5.9982],
+    "RF_75": [6.0226, 4.5090, 25.1596, 6.0216],
+    "RF_100": [5.9895, 4.4894, 24.7869, 5.9892],
+    "ELM": [6.5647, 4.9866, 28.1907, 6.1059]
+  },
+  "metric_order": ["rmse", "mae", "max_error", "std_error"],
+  "seconds": {"RF_25": 165.28, "RF_50": 347.86, "RF_75": 526.50, "RF_100": 656.11, "ELM": 1.42}
+}
