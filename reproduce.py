@@ -34,6 +34,10 @@ def download():
     return archive
 
 def load_data():
+    if not (ROOT / 'data/raw/TripA01.csv').exists():
+        for archive in sorted((ROOT / 'data').glob('trips_*.zip')):
+            with zipfile.ZipFile(archive) as z:
+                z.extractall(ROOT / 'data/raw')
     files = sorted((ROOT / 'data/raw').rglob('Trip*.csv'))
     if len(files) != 70:
         raise ValueError(f'Expected 70 trips, found {len(files)}. Run with --download.')

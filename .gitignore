@@ -1,6 +1,7 @@
 .packages/
 __pycache__/
 data/dataset.zip
+data/raw/
 tmp/
 *.joblib
 *.pdf

@@ -6,7 +6,7 @@ It takes battery voltage, current, battery temperature and outside temperature, 
 
 ## Data
 
-The dataset is included in `data/raw`, so you don't need to download anything separately. It has 70 BMW i3 trips. The first 60 are used for training and the last 10 for testing.
+The dataset is included in the ZIP files in `data`, so you don't need to download anything separately. The code unpacks it for you. It has 70 BMW i3 trips. The first 60 are used for training and the last 10 for testing.
 
 The data is **Battery and Heating Data in Real Driving Cycles** by Matthias Steinstraeter, Johannes Buberger and Dimitar Trifonov. [Original source](https://doi.org/10.21227/6jr9-5235) / [Kaggle copy](https://www.kaggle.com/datasets/atechnohazard/battery-and-heating-data-in-real-driving-cycles).
 
@@ -49,3 +49,4 @@ To check the results after running:
 ```sh
 python verify_results.py results
 ```
+
