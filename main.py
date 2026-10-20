@@ -1,8 +1,9 @@
-"""Auditable reconstruction of Sulaiman & Mustaffa (2024), DOI 100177."""
+"""Recreate the battery charge prediction experiment from Sulaiman & Mustaffa (2024)."""
 
 from pathlib import Path
 import sys
 
+# Also look in .packages for libraries installed beside this script.
 sys.path.insert(0, str(Path(__file__).parent / ".packages"))
 import argparse
 import hashlib
@@ -21,11 +22,15 @@ from scipy.special import expit
 import joblib
 import matplotlib
 
+# Save graphs as image files without opening a graph window.
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Build paths from this script's folder, even when we run it from another folder.
 ROOT = Path(__file__).parent
 URL = "https://www.kaggle.com/api/v1/datasets/download/atechnohazard/battery-and-heating-data-in-real-driving-cycles"
+# Match these beginnings of the original CSV column names.
+# The first four columns are inputs. SoC is the charge percentage we want to predict.
 KEYS = [
     "Battery Voltage [",
     "Battery Current [",
@@ -33,6 +38,7 @@ KEYS = [
     "Ambient Temperature [",
     "SoC [",
 ]
+# Rename those five columns to these shorter, consistent names after reading them.
 NAMES = [
     "voltage_V",
     "current_A",
@@ -42,7 +48,8 @@ NAMES = [
 ]
 
 
-# Optional: fetch the original archive if you want a fresh copy.
+# Download only when --download is used; the included ZIPs are enough for a normal
+# run. Reuse dataset.zip if it is already present instead of downloading it again.
 def download():
     base = ROOT / "data"
     base.mkdir(exist_ok=True)
@@ -53,6 +60,7 @@ def download():
         raise ValueError("Download is not a ZIP; obtain the dataset from Kaggle manually.")
     with zipfile.ZipFile(archive) as z:
         target = (base / "raw").resolve()
+        # Reject ZIP paths that would put a file outside the data/raw folder.
         for name in z.namelist():
             if not (target / name).resolve().is_relative_to(target):
                 raise ValueError("Unsafe archive member")
@@ -61,7 +69,8 @@ def download():
 
 
 # 1. LOAD AND CLEAN THE DATA
-# Each CSV is one drive. Keep four readings and the recorded SOC (charge percentage).
+# Each CSV contains readings from one drive, also called a trip.
+# Return a table of usable readings and a table describing how each file was cleaned.
 def load_data():
     # Unpack the included data on the first run.
     if not (ROOT / "data/raw/TripA01.csv").exists():
@@ -77,7 +86,8 @@ def load_data():
     for trip_number, file_path in enumerate(files):
         # The original files use semicolons between values and Latin-1 text encoding.
         data = pd.read_csv(file_path, sep=";", encoding="latin1")
-        # Find columns by their header names because some trips have fewer columns.
+        # Match header names instead of column positions, because trip files can
+        # have different extra columns or unit symbols at the ends of their headers.
         columns = []
         for prefix in KEYS:
             for column in data.columns:
@@ -86,7 +96,8 @@ def load_data():
                     break
             else:
                 raise ValueError(f"Missing column: {prefix} in {file_path.name}")
-        # Turn invalid values into NaN (missing), then discard incomplete rows.
+        # Convert the five columns to numbers. Invalid text and infinity become
+        # NaN (missing). Keep only rows that have all five required values.
         clean_data = (
             data[columns]
             .apply(pd.to_numeric, errors="coerce")
@@ -95,7 +106,8 @@ def load_data():
         clean_data.columns = NAMES
         valid = clean_data.notna().all(axis=1)
         clean_data = clean_data.loc[valid].copy()
-        # Keep the trip, original line number and time so we can trace predictions.
+        # Keep enough information to find a prediction in its original CSV.
+        # Add 2 to source_row because counting starts at 0 and the CSV has a header.
         clean_data["trip"] = file_path.stem
         clean_data["source_row"] = np.flatnonzero(valid) + 2
         clean_data["time_s"] = pd.to_numeric(
@@ -107,7 +119,8 @@ def load_data():
         else:
             clean_data["split"] = "test"
         parts.append(clean_data)
-        # Record row counts and a file fingerprint to identify the data used.
+        # Record the number of rows kept and removed from this trip.
+        # SHA-256 is a fingerprint of the file contents: changing the file changes it.
         audit.append(
             dict(
                 trip=file_path.stem,
@@ -118,15 +131,19 @@ def load_data():
                 sha256=hashlib.sha256(file_path.read_bytes()).hexdigest(),
             )
         )
+    # Join the trips into one table and give its rows consecutive numbers.
     return (pd.concat(parts, ignore_index=True), pd.DataFrame(audit))
 
 
 # 2. MEASURE PREDICTION ERRORS
-# RMSE = square errors, average, square root. MAE = average absolute error.
-# Both are in SOC percentage points. Lower is better.
+# Predicting 65% when the recorded charge is 60% gives an error of +5 points.
+# RMSE squares the errors before averaging, so large mistakes count more heavily.
+# MAE averages the size of the mistakes, ignoring their positive or negative signs.
+# Both are measured in percentage points; smaller values mean better predictions.
 def metrics(y, predictions_array):
     # Positive errors mean the model predicted too much charge.
-    # std_error measures error spread; ddof=1 uses the sample standard deviation.
+    # max_error is the biggest mistake. std_error measures how spread out the
+    # signed errors are; ddof=1 calculates the sample standard deviation.
     errors = predictions_array - y
     return dict(
         rmse=float(np.sqrt(np.mean(errors**2))),
@@ -137,25 +154,34 @@ def metrics(y, predictions_array):
 
 
 # 3. ELM COMPARISON MODEL
-# An extreme learning machine has random hidden weights and learned output weights.
-# These are assumed settings because the paper does not give its exact ELM setup.
+# ELM means extreme learning machine. It is a small neural network used here
+# to compare with the random forest. Its hidden layer has fixed random weights;
+# training learns only the weights used to turn hidden outputs into predictions.
+# The paper does not give its exact ELM setup, so these settings are assumptions.
 class ELM:
-    """Assumed baseline: standardized inputs, sigmoid hidden layer, ridge output."""
+    """Scale the inputs, calculate hidden outputs, then learn a weighted sum of them."""
 
     def __init__(self, seed, hidden=100, ridge=0.001):
+        # seed repeats the random choices; hidden is the number of hidden neurons.
+        # ridge sets a small penalty that discourages very large output weights.
         self.seed = seed
         self.hidden = hidden
         self.ridge = ridge
 
     def fit(self, x, y):
-        # Learn means/scales from training inputs only, then reuse them on test inputs.
+        # Put the inputs on comparable scales: subtract each column's mean and
+        # divide by its standard deviation. Learn these values from training data
+        # only, so the test trips cannot influence training.
         self.scaler = StandardScaler().fit(x)
-        # A seed repeats the same random weights. Hidden weights do not get trained.
+        # w connects the four inputs to the hidden neurons. b adds an offset to
+        # each neuron. These random values stay unchanged during training.
         rng = np.random.default_rng(self.seed)
         self.w = rng.uniform(-1, 1, (x.shape[1], self.hidden))
         self.b = rng.uniform(-1, 1, self.hidden)
-        # Accumulate H.T @ H and H.T @ y without storing a huge hidden-layer table.
-        # @ means matrix multiplication; .T swaps rows and columns.
+        # Each row of H contains one sample's hidden outputs plus a constant 1.
+        # We need H.T @ H and H.T @ y to calculate the output weights. Add their
+        # totals in chunks instead of keeping the entire H table in memory.
+        # @ multiplies matrices; .T swaps their rows and columns.
         feature_products = np.zeros((self.hidden + 1, self.hidden + 1))
         feature_targets = np.zeros(self.hidden + 1)
         # Work in chunks of 10,000 rows to keep memory use manageable.
@@ -163,21 +189,26 @@ class ELM:
             hidden_outputs = self.design(x[start : start + 10000])
             feature_products += hidden_outputs.T @ hidden_outputs
             feature_targets += hidden_outputs.T @ y[start : start + 10000]
-        # A small ridge penalty stabilises the solution. The intercept is not penalised.
+        # Add a small penalty to avoid unstable, very large output weights.
+        # Leave the last weight unpenalised: it is the constant offset (intercept).
         penalty = np.eye(self.hidden + 1) * self.ridge
         penalty[-1, -1] = 0
-        # Solve for the output weights: (H.T H + penalty) beta = H.T y.
+        # Solve these equations to find beta, the learned output weights:
+        # (H.T @ H + penalty) @ beta = H.T @ y.
         self.beta = np.linalg.solve(feature_products + penalty, feature_targets)
         return self
 
-    # Turn the four readings into sigmoid neuron outputs; add ones for an intercept.
+    # Calculate the hidden neurons' responses to the four scaled readings.
+    # expit is the sigmoid function: it maps a number to a value between 0 and 1.
+    # The column of ones lets the model learn a constant offset as well.
     def design(self, x):
         scaled_inputs = self.scaler.transform(x)
         hidden_values = expit(scaled_inputs @ self.w + self.b)
         intercept_column = np.ones(len(x))
         return np.column_stack([hidden_values, intercept_column])
 
-    # Multiply hidden outputs by learned output weights to predict each row.
+    # Multiply each hidden output by its learned weight and add the results,
+    # including the constant offset, to predict the charge percentage.
     def predict(self, x):
         predictions = []
         # Work in chunks of 10,000 rows to keep memory use manageable.
@@ -190,9 +221,12 @@ class ELM:
 
 # 4. RANDOM FOREST SETTINGS
 # A forest averages predictions from multiple decision trees.
-# min_leaf: minimum samples per final leaf; max_features=0.5: two of four inputs
-# at each split. Bootstrap samples rows with replacement. jobs controls workers.
-# warm_start lets 25 trees grow to 50, 75 and 100 without rebuilding earlier trees.
+# Each tree asks questions about inputs and ends at a leaf with a prediction.
+# min_leaf sets the minimum number of training samples allowed in a leaf.
+# max_features=0.5 lets a tree consider two of the four inputs for each question.
+# bootstrap gives each tree a random sample of rows; a row may be picked repeatedly.
+# jobs sets how many workers can build trees at once. seed repeats random choices.
+# warm_start keeps existing trees as we grow the forest from 25 to 50, etc.
 def create_forest(settings, seed):
     return RandomForestRegressor(
         min_samples_leaf=settings.min_leaf,
@@ -223,7 +257,9 @@ def main():
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--predict", nargs=3, metavar=("MODEL", "INPUT", "OUTPUT"))
     settings = parser.parse_args()
-    # These optional modes replace the old separate prediction/report/check scripts.
+    # These modes each do one task and stop, without training a new model.
+    # --predict uses a saved forest; --report-only rebuilds the report from saved
+    # scores; --verify checks saved scores against the saved predictions.
     if settings.predict:
         predict_file(*settings.predict)
         return
@@ -244,13 +280,15 @@ def main():
     # Divide the cleaned data by trip before fitting any model.
     train = data[data.split == "train"]
     test = data[data.split == "test"]
-    # x/y = training readings/answers; x_test/y_test = unseen readings/answers.
-    # Each x row has four numbers. Each y row has one charge percentage.
+    # x contains the four input readings; y contains the recorded charge per row.
+    # x_test and y_test have the same structure but come from the ten test trips.
+    # NAMES[:4] selects only inputs, so the answer is never given as an input.
     x = train[NAMES[:4]].to_numpy(dtype=np.float32)
     y = train.soc_percent.to_numpy()
     x_test = test[NAMES[:4]].to_numpy(dtype=np.float32)
     y_test = test.soc_percent.to_numpy()
-    # Save settings and library versions so the experiment can be repeated.
+    # Save settings, library versions and trip names in manifest.json to describe
+    # this run. Convert Path values to text because JSON cannot store Path objects.
     saved_settings = {}
     for name, value in vars(settings).items():
         if isinstance(value, Path):
@@ -278,16 +316,21 @@ def main():
     # Repeat using different seeds; default seeds are 42, 43, 44, 45 and 46.
     for run in range(settings.runs):
         seed = settings.seed + run
-        # Cross-validation uses only training data to choose the tree count.
+        # Cross-validation compares tree counts using only the training trips.
+        # It temporarily sets some training readings aside to check predictions.
+        # The ten test trips stay untouched until the separate test evaluation.
         if settings.cv != "none":
-            # Row CV mixes nearby samples; trip CV holds out entire drives instead.
+            # "row" randomly divides individual readings into five groups (folds).
+            # "trip" keeps all readings from a drive together in the same fold.
+            # Row splitting can put similar readings from one trip on both sides.
             if settings.cv == "row":
                 splitter = KFold(5, shuffle=True, random_state=seed)
                 splits = splitter.split(x, y)
             else:
                 splitter = GroupKFold(5)
                 splits = splitter.split(x, y, groups=train.trip)
-            # Train on four folds and validate on the fifth, rotating through all five.
+            # Train on four folds and check predictions on the remaining fold.
+            # Repeat five times so each fold is used once for checking predictions.
             for fold, (training_indices, validation_indices) in enumerate(splits, 1):
                 forest = create_forest(settings, seed)
                 fold_inputs = x[training_indices]
@@ -345,7 +388,8 @@ def main():
                 )
             )
             predictions[f"RF_{trees}_run{run + 1}"] = predictions_array
-            # Save the first seeded model for each size, not the luckiest test run.
+            # Keep run 1's model for future predictions, rather than picking a run
+            # because it happened to score best on the test trips.
             if run == 0:
                 joblib.dump(forest, output_folder / f"rf_{trees}.joblib", compress=3)
             print(f"RF {trees}, run {run + 1}: test {score}", flush=True)
@@ -376,14 +420,17 @@ def main():
             )
     pd.DataFrame(test_scores).to_csv(output_folder / "test_metrics.csv", index=False)
     predictions.to_csv(output_folder / "predictions.csv.gz", index=False)
-    # Summarise minimum, average and variation across runs for each model.
+    # Group repeated runs by model and tree count. Save the smallest value,
+    # average and standard deviation (spread across runs) for each measured score.
     summary = (
         pd.DataFrame(test_scores)
         .groupby(["model", "trees"])[["rmse", "mae", "max_error", "std_error", "seconds"]]
         .agg(["min", "mean", "std"])
     )
     summary.to_csv(output_folder / "summary.csv")
-    # Choose using validation error, never test error. Without CV use the first count.
+    # Pick the tree count with the lowest average validation RMSE across runs/folds.
+    # Test scores never affect this choice. If validation was skipped, keep the
+    # first tree count supplied by the user.
     selected = settings.trees[0]
     selection_basis = "first requested tree count; CV skipped"
     average_validation_errors = {}
@@ -402,8 +449,9 @@ def main():
         "cv_rmse": average_validation_errors,
     }
     (output_folder / "selection.json").write_text(json.dumps(selection, indent=2))
-    # Top graph: recorded and predicted charge. Bottom: predicted minus recorded.
-    # The horizontal axis counts samples across trips, not elapsed seconds.
+    # Top graph: compare recorded charge with run 1 of each model.
+    # Bottom graph: show prediction errors; zero means a correct prediction.
+    # Join the test trips along the horizontal axis and count rows, not seconds.
     fig, axs = plt.subplots(2, 1, figsize=(13, 7), sharex=True)
     index = np.arange(1, len(y_test) + 1)
     axs[0].plot(index, y_test, label="Observed OEM SOC", lw=1)
@@ -432,7 +480,9 @@ def make_report(output_folder):
     manifest = json.loads((output_folder / "manifest.json").read_text())
     selection = json.loads((output_folder / "selection.json").read_text())
     records = []
-    # Group repeated runs for each model. Minima for different metrics may differ in run.
+    # Compare each model's smallest and average errors with the paper's values.
+    # The smallest RMSE and smallest MAE may come from different runs, so these
+    # separate minimum scores do not necessarily describe one particular model run.
     for (model, trees), runs in scores.groupby(["model", "trees"], sort=False):
         name = f"RF_{trees}" if model == "RF" else "ELM"
         for metric in paper["metric_order"]:
@@ -465,7 +515,7 @@ def make_report(output_folder):
         "| Model | Paper best RMSE | Measured min RMSE | Paper mean RMSE | Measured mean RMSE | Measured mean MAE |",
         "|---|---:|---:|---:|---:|---:|",
     ]
-    # Group repeated runs for each model. Minima for different metrics may differ in run.
+    # Add one row per model to the report table, summarising its repeated runs.
     for (model, trees), runs in scores.groupby(["model", "trees"], sort=False):
         name = f"RF_{trees}" if model == "RF" else "ELM"
         lines.append(
@@ -502,6 +552,8 @@ def make_report(output_folder):
         "",
     ]
     (output_folder / "REPORT.md").write_text("\n".join(lines), encoding="utf-8")
+    # Put the paper's average RMSE and our average RMSE side by side for each model.
+    # Shift bars left and right by 0.19 so each pair does not overlap.
     rmse_rows = comparison[comparison.metric == "rmse"]
     fig, ax = plt.subplots(figsize=(9, 4.5))
     x = range(len(rmse_rows))
@@ -528,13 +580,15 @@ def make_report(output_folder):
 
 
 # 7. CHECK SAVED RESULTS
-# Check experiment coverage and recalculate each error from saved predictions.
+# Check that every requested model run has a result, then calculate its scores
+# again from the saved predictions to check that the saved numbers agree.
 def verify_results(output_folder):
     manifest = json.loads((output_folder / "manifest.json").read_text())
     settings = manifest["arguments"]
     scores = pd.read_csv(output_folder / "test_metrics.csv")
     predictions_array = pd.read_csv(output_folder / "predictions.csv.gz")
-    # Require one result for each requested tree count and run, without duplicates.
+    # Build the combinations that should exist, such as (25 trees, run 1).
+    # Sets check which combinations exist; lengths also catch duplicate results.
     expected = {
         (t, run_number)
         for t in settings["trees"]
@@ -544,9 +598,12 @@ def verify_results(output_folder):
     elm = scores[scores.model == "ELM"]
     assert set(zip(rf.trees, rf.run)) == expected and len(rf) == len(expected)
     assert len(elm) == settings["runs"] and elm.run.nunique() == settings["runs"]
+    # This dataset has 118,974 usable test readings. Each needs a prediction,
+    # and saved numeric values must be finite (no missing values or infinity).
     assert len(predictions_array) == manifest["test_rows"] == 118974
     assert np.isfinite(predictions_array.select_dtypes("number").to_numpy()).all()
-    # Recalculate every metric and allow only tiny floating-point rounding differences.
+    # Recalculate each run's scores from its prediction column. Decimal values can
+    # change slightly when saved and read back, so allow a tiny rounding margin.
     for row in scores.itertuples():
         col = f"RF_{row.trees}_run{row.run}" if row.model == "RF" else f"ELM_run{row.run}"
         recomputed = metrics(
@@ -564,7 +621,9 @@ def verify_results(output_folder):
         assert set(zip(cv.trees, cv.run, cv.fold)) == expected_cv and len(cv) == len(
             expected_cv
         )
-    # Check audit counts and fingerprint format. This does not re-hash source files.
+    # Check that the cleaning log lists 70 trips and the expected train/test totals.
+    # A SHA-256 fingerprint has 64 characters. Here we check its length only;
+    # we do not read the source CSVs again to check their actual contents.
     audit = pd.read_csv(output_folder / "data_audit.csv")
     assert len(audit) == 70 and audit.sha256.str.len().eq(64).all()
     assert audit.groupby("split").retained_rows.sum().to_dict() == {
@@ -584,7 +643,9 @@ def verify_results(output_folder):
 
 
 # 8. USE A SAVED FOREST
-# Read four input columns in their training order and write predictions to a new CSV.
+# Load a saved random forest and use it on a new CSV with these four input columns.
+# Keep them in the same order used for training. Keep the original CSV columns
+# and add predicted_soc_percent before saving the new file.
 def predict_file(model_path, input_path, output_path):
     data = pd.read_csv(input_path)
     columns = ["voltage_V", "current_A", "battery_temperature_C", "ambient_temperature_C"]
@@ -596,6 +657,7 @@ def predict_file(model_path, input_path, output_path):
     data.to_csv(output_path, index=False)
 
 
-# Start only when run directly. Importing this file does not start training.
+# Python sets __name__ to "__main__" when we run this file directly.
+# This prevents training from starting just because another script imports this file.
 if __name__ == "__main__":
     main()
