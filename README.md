@@ -16,14 +16,15 @@ Use Python 3.12 or newer:
 
 ```sh
 pip install -r requirements.txt
-python reproduce.py
-python make_report.py results
+python main.py
 ```
+
+Everything is in `main.py`, with comments explaining each step. It saves the report and checks the results automatically.
 
 This runs 25, 50, 75 and 100 trees, with 5 runs each and 5-fold validation. It takes a while. For a smaller run:
 
 ```sh
-python reproduce.py --trees 25 --runs 1 --output results_quick
+python main.py --trees 25 --runs 1 --output results_quick
 ```
 
 ## Results
@@ -47,6 +48,6 @@ The graphs and full comparison are in [results/REPORT.md](results/REPORT.md). Sa
 To check the results after running:
 
 ```sh
-python verify_results.py results
+python main.py --verify
 ```
 
